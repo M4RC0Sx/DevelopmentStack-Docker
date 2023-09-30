@@ -1,0 +1,11 @@
+tls:
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /certs/domain.com.pem
+        keyFile: /certs/domain.com.key
+  certificates:
+    - certFile: /certs/domain.com.pem
+      keyFile: /certs/domain.com.key
+      stores:
+        - default

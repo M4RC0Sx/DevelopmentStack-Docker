@@ -1,0 +1,167 @@
+version: "3.9"
+
+services:
+  traefik:
+    image: traefik:2.9
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      # HTTP to HTTPS global redirection
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.http.tls=true"
+      # SSL with Let's Encrypt (ACME)
+      - "--certificatesresolvers.letsencrypt.acme.email=letsencrypt@domain.com"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/etc/traefik/acme/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      # SSH GitLab
+      - "--entrypoints.ssh-gitlab.address=:2222"
+      # Traefik dashboard
+      # - "--api=true"
+      - "--api.dashboard=true" # Enable dashboard
+      - "--api.insecure=false" # Public access to API (insecure)
+      # Dynamic configuration file
+      #- --providers.file.filename=/dynamic.yaml
+      # Docker configuration
+      - "--providers.docker" # Enable Docker provider
+      - "--providers.docker.exposedbydefault=false" # Disable exposing all containers by default
+      - "--providers.docker.network=traefik-network" # Use the traefik network
+      - "--providers.docker.endpoint=unix:///var/run/docker.sock" # Docker socket
+      - "--providers.docker.swarmMode=false" # Disable swarm mode
+      - "--providers.docker.watch=true" # Enable swarm events watch
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.domain.com`)"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.service=api@internal" # Enable API as a service
+      - "traefik.http.routers.traefik.tls.certresolver=letsencrypt"
+      - "traefik.http.middlewares.auth.basicauth.users=USER:PASSWD"
+      - "traefik.http.routers.traefik.middlewares=auth"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "2222:2222"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      #- ./traefik/dynamic.yaml:/dynamic.yaml:ro
+      #- ./traefik/certs:/certs:ro
+      - ./traefik/acme.json:/etc/traefik/acme/acme.json
+    networks:
+      - default
+      - traefik-network
+  gitlab:
+    image: gitlab/gitlab-ce:15.4.0-ce.0
+    container_name: gitlab
+    restart: unless-stopped
+    # This breaks FQDN DNS resolution with a runner on the same machine!
+    #hostname: 'gitlab.domain.com'
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'https://gitlab.domain.com'
+        nginx['listen_port'] = 80
+        nginx['listen_https'] = false
+        gitlab_rails['gitlab_shell_ssh_port'] = 2222
+        gitlab_rails['gitlab_default_theme'] = 2
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.gitlab.rule=Host(`gitlab.domain.com`)"
+      - "traefik.http.routers.gitlab.entrypoints=websecure"
+      - "traefik.http.routers.gitlab.service=gitlab-svc"
+      - "traefik.http.services.gitlab-svc.loadbalancer.server.port=80"
+      - "traefik.http.routers.gitlab.tls.certresolver=letsencrypt"
+      # SSH GitLab
+      - "traefik.tcp.routers.gitlab-ssh.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.gitlab-ssh.entrypoints=ssh-gitlab"
+      - "traefik.tcp.routers.gitlab-ssh.service=gitlab-ssh-svc"
+      # GitLab container SSH port is always 22
+      # Setting gitlab_rails['gitlab_shell_ssh_port'] = 2222 is only for changing the URL in git clone button
+      # External access to SSH is done through Traefik port 2222 which is mapped to GitLab container port 22 
+      - "traefik.tcp.services.gitlab-ssh-svc.loadbalancer.server.port=22"
+    volumes:
+      - ./gitlab/config:/etc/gitlab
+      - ./gitlab/logs:/var/log/gitlab
+      - ./gitlab/data:/var/opt/gitlab
+    networks:
+      - default
+      - traefik-network
+      - gitlab-network
+  gitlab-runner-1:
+    image: gitlab/gitlab-runner:latest
+    container_name: gitlab-runner-1
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./gitlab/runners/runner-1:/etc/gitlab-runner
+      - ./gitlab/runners/cert/gitlab.domain.com.crt:/etc/gitlab-runner/certs/gitlab.domain.com.crt
+    networks:
+      - default
+      - gitlab-network
+  nexus:
+    image: sonatype/nexus3:3.41.1
+    container_name: nexus
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      # Repository
+      - "traefik.http.routers.nexus.rule=Host(`nexus.domain.com`)"
+      - "traefik.http.routers.nexus.entrypoints=websecure"
+      - "traefik.http.routers.nexus.service=nexus-svc"
+      - "traefik.http.services.nexus-svc.loadbalancer.server.port=8081"
+      - "traefik.http.routers.nexus.tls.certresolver=letsencrypt"
+      # Registry proxy (Docker PULL)
+      - "traefik.http.routers.nexus-registry-proxy.rule=Host(`registry.domain.com`) && Method(`GET`, `HEAD`)"
+      - "traefik.http.routers.nexus-registry-proxy.entrypoints=websecure"
+      - "traefik.http.routers.nexus-registry-proxy.service=nexus-registry-proxy-svc"
+      - "traefik.http.services.nexus-registry-proxy-svc.loadbalancer.server.port=8081"
+      # Registry private (Docker PUSH)
+      - "traefik.http.routers.nexus-registry-private.rule=Host(`registry.domain.com`) && Method(`POST`, `PUT`, `PATCH`, `DELETE`)"
+      - "traefik.http.routers.nexus-registry-private.entrypoints=websecure"
+      - "traefik.http.routers.nexus-registry-private.service=nexus-registry-private-svc"
+      - "traefik.http.services.nexus-registry-private-svc.loadbalancer.server.port=8082"
+    volumes:
+      - ./nexus/data:/nexus-data
+    networks:
+      - default
+      - traefik-network
+  jenkins:
+    image: jenkins/jenkins:2.368-jdk11
+    container_name: jenkins
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.jenkins.rule=Host(`jenkins.domain.com`)"
+      - "traefik.http.routers.jenkins.entrypoints=websecure"
+      - "traefik.http.routers.jenkins.service=jenkins-svc"
+      - "traefik.http.services.jenkins-svc.loadbalancer.server.port=8080"
+      - "traefik.http.routers.jenkins.tls.certresolver=letsencrypt"
+    volumes:
+      - ./jenkins/data:/var/jenkins_home
+    networks:
+      - default
+      - traefik-network
+  sonarqube:
+    image: sonarqube:9.6.1-community
+    container_name: sonarqube
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.sonarqube.rule=Host(`sonarqube.domain.com`)"
+      - "traefik.http.routers.sonarqube.entrypoints=websecure"
+      - "traefik.http.routers.sonarqube.service=sonarqube-svc"
+      - "traefik.http.services.sonarqube-svc.loadbalancer.server.port=9000"
+      - "traefik.http.routers.sonarqube.tls.certresolver=letsencrypt"
+    volumes:
+      - ./sonarqube/data:/opt/sonarqube/data
+      - ./sonarqube/extensions:/opt/sonarqube/extensions
+      - ./sonarqube/logs:/opt/sonarqube/logs
+    networks:
+      - default
+      - traefik-network
+
+networks:
+  gitlab-network:
+  traefik-network:
+    external: true
