@@ -111,16 +111,11 @@ services:
       - "traefik.http.routers.nexus.service=nexus-svc"
       - "traefik.http.services.nexus-svc.loadbalancer.server.port=8081"
       - "traefik.http.routers.nexus.tls.certresolver=letsencrypt"
-      # Registry proxy (Docker PULL)
-      - "traefik.http.routers.nexus-registry-proxy.rule=Host(`registry.domain.com`) && Method(`GET`, `HEAD`)"
-      - "traefik.http.routers.nexus-registry-proxy.entrypoints=websecure"
-      - "traefik.http.routers.nexus-registry-proxy.service=nexus-registry-proxy-svc"
-      - "traefik.http.services.nexus-registry-proxy-svc.loadbalancer.server.port=8081"
-      # Registry private (Docker PUSH)
-      - "traefik.http.routers.nexus-registry-private.rule=Host(`registry.domain.com`) && Method(`POST`, `PUT`, `PATCH`, `DELETE`)"
-      - "traefik.http.routers.nexus-registry-private.entrypoints=websecure"
-      - "traefik.http.routers.nexus-registry-private.service=nexus-registry-private-svc"
-      - "traefik.http.services.nexus-registry-private-svc.loadbalancer.server.port=8082"
+      # Registry (Docker)
+      - "traefik.http.routers.nexus-registry.rule=Host(`registry.domain.com`)"
+      - "traefik.http.routers.nexus-registry.entrypoints=websecure"
+      - "traefik.http.routers.nexus-registry.service=nexus-registry-private-svc"
+      - "traefik.http.services.nexus-registry-svc.loadbalancer.server.port=8082"
     volumes:
       - ./nexus/data:/nexus-data
     networks:
